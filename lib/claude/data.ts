@@ -1,0 +1,310 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import matter from 'gray-matter';
+
+const CLAUDE_DIR = process.env.CLAUDE_DIR ?? path.join(os.homedir(), '.claude');
+const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+
+export interface ProjectSummary {
+  slug: string;
+  /** Real filesystem path, recovered from a session's `cwd` field (the slug encoding is lossy). */
+  realPath: string | null;
+  sessionCount: number;
+  memoryCount: number;
+  lastActive: Date | null;
+}
+
+export interface MemoryEntry {
+  file: string;
+  title: string;
+  description: string | null;
+  type: string | null;
+}
+
+export interface Memory extends MemoryEntry {
+  content: string;
+}
+
+export interface SessionSummary {
+  id: string;
+  mtime: Date;
+  size: number;
+  firstPrompt: string | null;
+}
+
+export type TranscriptBlock =
+  | { kind: 'text'; role: 'user' | 'assistant'; text: string; timestamp?: string }
+  | { kind: 'thinking'; text: string }
+  | { kind: 'tool-use'; name: string; input: unknown; id: string }
+  | { kind: 'tool-result'; toolUseId: string; text: string; isError: boolean };
+
+export interface Transcript {
+  blocks: TranscriptBlock[];
+  totalLines: number;
+  skippedLines: number;
+  truncated: boolean;
+}
+
+const MAX_BLOCKS = 2000;
+
+function projectDir(slug: string): string {
+  // Slugs are directory names under ~/.claude/projects — reject anything path-like.
+  if (slug.includes('/') || slug.includes('\\') || slug.startsWith('.')) {
+    throw new Error(`invalid project slug: ${slug}`);
+  }
+  return path.join(PROJECTS_DIR, slug);
+}
+
+async function sessionFiles(slug: string): Promise<{ name: string; mtime: Date; size: number }[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(projectDir(slug), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files = await Promise.all(
+    entries
+      .filter((e) => e.isFile() && e.name.endsWith('.jsonl'))
+      .map(async (e) => {
+        const stat = await fs.stat(path.join(projectDir(slug), e.name));
+        return { name: e.name, mtime: stat.mtime, size: stat.size };
+      }),
+  );
+  return files.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+}
+
+const realPathCache = new Map<string, { mtimeMs: number; realPath: string | null }>();
+
+/** Recover the project's real path by reading `cwd` from its newest transcript. */
+async function detectRealPath(slug: string, newest?: { name: string; mtime: Date }): Promise<string | null> {
+  if (!newest) return null;
+  const cached = realPathCache.get(slug);
+  if (cached && cached.mtimeMs === newest.mtime.getTime()) return cached.realPath;
+
+  let realPath: string | null = null;
+  try {
+    const fd = await fs.open(path.join(projectDir(slug), newest.name));
+    try {
+      const buf = Buffer.alloc(16384);
+      const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
+      const match = buf.toString('utf8', 0, bytesRead).match(/"cwd":"((?:[^"\\]|\\.)*)"/);
+      if (match) realPath = JSON.parse(`"${match[1]}"`);
+    } finally {
+      await fd.close();
+    }
+  } catch {
+    // unreadable transcript — leave null
+  }
+  realPathCache.set(slug, { mtimeMs: newest.mtime.getTime(), realPath });
+  return realPath;
+}
+
+export async function listProjects(): Promise<ProjectSummary[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const projects = await Promise.all(
+    entries
+      .filter((e) => e.isDirectory())
+      .map(async (e) => {
+        const [sessions, memories] = await Promise.all([sessionFiles(e.name), listMemories(e.name)]);
+        return {
+          slug: e.name,
+          realPath: await detectRealPath(e.name, sessions[0]),
+          sessionCount: sessions.length,
+          memoryCount: memories.length,
+          lastActive: sessions[0]?.mtime ?? null,
+        };
+      }),
+  );
+  return projects.sort((a, b) => (b.lastActive?.getTime() ?? 0) - (a.lastActive?.getTime() ?? 0));
+}
+
+export async function getProject(slug: string): Promise<ProjectSummary | null> {
+  try {
+    await fs.access(projectDir(slug));
+  } catch {
+    return null;
+  }
+  const [sessions, memories] = await Promise.all([sessionFiles(slug), listMemories(slug)]);
+  return {
+    slug,
+    realPath: await detectRealPath(slug, sessions[0]),
+    sessionCount: sessions.length,
+    memoryCount: memories.length,
+    lastActive: sessions[0]?.mtime ?? null,
+  };
+}
+
+export async function listMemories(slug: string): Promise<MemoryEntry[]> {
+  const dir = path.join(projectDir(slug), 'memory');
+  let files;
+  try {
+    files = await fs.readdir(dir);
+  } catch {
+    return [];
+  }
+  const memories = await Promise.all(
+    files
+      .filter((f) => f.endsWith('.md'))
+      .sort()
+      .map(async (file) => {
+        const raw = await fs.readFile(path.join(dir, file), 'utf8');
+        const { data } = matter(raw);
+        return {
+          file,
+          title: typeof data.name === 'string' ? data.name : file.replace(/\.md$/, ''),
+          description: typeof data.description === 'string' ? data.description : null,
+          type: typeof data.metadata?.type === 'string' ? data.metadata.type : null,
+        };
+      }),
+  );
+  // MEMORY.md is the index — always first.
+  return memories.sort((a, b) => Number(b.file === 'MEMORY.md') - Number(a.file === 'MEMORY.md'));
+}
+
+export async function getMemory(slug: string, file: string): Promise<Memory | null> {
+  if (file.includes('/') || file.includes('\\') || !file.endsWith('.md')) return null;
+  let raw;
+  try {
+    raw = await fs.readFile(path.join(projectDir(slug), 'memory', file), 'utf8');
+  } catch {
+    return null;
+  }
+  const { data, content } = matter(raw);
+  return {
+    file,
+    title: typeof data.name === 'string' ? data.name : file.replace(/\.md$/, ''),
+    description: typeof data.description === 'string' ? data.description : null,
+    type: typeof data.metadata?.type === 'string' ? data.metadata.type : null,
+    content,
+  };
+}
+
+function extractText(content: unknown): string | null {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const texts = content
+      .filter((c): c is { type: string; text: string } => c?.type === 'text' && typeof c.text === 'string')
+      .map((c) => c.text);
+    return texts.length > 0 ? texts.join('\n') : null;
+  }
+  return null;
+}
+
+function isNoisePrompt(text: string): boolean {
+  return text.startsWith('<') || text.startsWith('Caveat:');
+}
+
+export async function listSessions(slug: string): Promise<SessionSummary[]> {
+  const files = await sessionFiles(slug);
+  return Promise.all(
+    files.map(async (f) => ({
+      id: f.name.replace(/\.jsonl$/, ''),
+      mtime: f.mtime,
+      size: f.size,
+      firstPrompt: await readFirstPrompt(slug, f.name),
+    })),
+  );
+}
+
+async function readFirstPrompt(slug: string, file: string): Promise<string | null> {
+  let head: string;
+  try {
+    const fd = await fs.open(path.join(projectDir(slug), file));
+    try {
+      const buf = Buffer.alloc(65536);
+      const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
+      head = buf.toString('utf8', 0, bytesRead);
+    } finally {
+      await fd.close();
+    }
+  } catch {
+    return null;
+  }
+  for (const line of head.split('\n')) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.type !== 'user' || entry.isMeta) continue;
+    const text = extractText(entry.message?.content);
+    if (text && !isNoisePrompt(text)) return text.trim().slice(0, 200);
+  }
+  return null;
+}
+
+export async function readTranscript(slug: string, id: string): Promise<Transcript | null> {
+  if (!/^[\w-]+$/.test(id)) return null;
+  let raw;
+  try {
+    raw = await fs.readFile(path.join(projectDir(slug), `${id}.jsonl`), 'utf8');
+  } catch {
+    return null;
+  }
+  const lines = raw.split('\n').filter((l) => l.trim() !== '');
+  const blocks: TranscriptBlock[] = [];
+  let skippedLines = 0;
+  let truncated = false;
+
+  for (const line of lines) {
+    if (blocks.length >= MAX_BLOCKS) {
+      truncated = true;
+      break;
+    }
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      skippedLines++;
+      continue;
+    }
+
+    if (entry.type === 'user' && !entry.isMeta) {
+      const content = entry.message?.content;
+      if (typeof content === 'string') {
+        blocks.push({ kind: 'text', role: 'user', text: content, timestamp: entry.timestamp });
+      } else if (Array.isArray(content)) {
+        for (const item of content) {
+          if (item?.type === 'text' && typeof item.text === 'string') {
+            blocks.push({ kind: 'text', role: 'user', text: item.text, timestamp: entry.timestamp });
+          } else if (item?.type === 'tool_result') {
+            blocks.push({
+              kind: 'tool-result',
+              toolUseId: item.tool_use_id ?? '',
+              text: extractText(item.content) ?? JSON.stringify(item.content),
+              isError: item.is_error === true,
+            });
+          }
+        }
+      } else {
+        skippedLines++;
+      }
+    } else if (entry.type === 'assistant') {
+      const content = entry.message?.content;
+      if (!Array.isArray(content)) {
+        skippedLines++;
+        continue;
+      }
+      for (const item of content) {
+        if (item?.type === 'text' && typeof item.text === 'string') {
+          blocks.push({ kind: 'text', role: 'assistant', text: item.text, timestamp: entry.timestamp });
+        } else if (item?.type === 'thinking' && typeof item.thinking === 'string') {
+          blocks.push({ kind: 'thinking', text: item.thinking });
+        } else if (item?.type === 'tool_use') {
+          blocks.push({ kind: 'tool-use', name: item.name ?? 'unknown', input: item.input, id: item.id ?? '' });
+        }
+      }
+    } else {
+      skippedLines++;
+    }
+  }
+
+  return { blocks, totalLines: lines.length, skippedLines, truncated };
+}
