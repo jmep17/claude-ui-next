@@ -46,7 +46,43 @@ export interface Transcript {
   truncated: boolean;
 }
 
+export interface ProjectMemories {
+  slug: string;
+  realPath: string | null;
+  memories: MemoryEntry[];
+}
+
 const MAX_BLOCKS = 2000;
+
+/** The user's global instructions at ~/.claude/CLAUDE.md, or null if absent. */
+export async function getGlobalClaudeMd(): Promise<string | null> {
+  try {
+    return await fs.readFile(path.join(CLAUDE_DIR, 'CLAUDE.md'), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** Memories from every project that has any, newest project first. */
+export async function listAllMemories(): Promise<ProjectMemories[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const groups = await Promise.all(
+    entries
+      .filter((e) => e.isDirectory())
+      .map(async (e) => {
+        const memories = await listMemories(e.name);
+        if (memories.length === 0) return null;
+        const sessions = await sessionFiles(e.name);
+        return { slug: e.name, realPath: await detectRealPath(e.name, sessions[0]), memories };
+      }),
+  );
+  return groups.filter((g): g is ProjectMemories => g !== null);
+}
 
 function projectDir(slug: string): string {
   // Slugs are directory names under ~/.claude/projects — reject anything path-like.

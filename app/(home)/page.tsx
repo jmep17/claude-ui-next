@@ -19,6 +19,15 @@ export default async function HomePage() {
         {active.length} projects in ~/.claude/projects
       </p>
       <div className="flex flex-col gap-2">
+        <Link
+          href="/global"
+          className="rounded-lg border border-fd-primary/40 bg-fd-card px-4 py-3 transition-colors hover:bg-fd-accent"
+        >
+          <div className="font-mono text-sm font-medium">Global</div>
+          <div className="mt-1 text-xs text-fd-muted-foreground">
+            ~/.claude/CLAUDE.md and memories across all projects
+          </div>
+        </Link>
         {active.map((p) => (
           <Link
             key={p.slug}

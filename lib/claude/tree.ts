@@ -1,5 +1,5 @@
 import type { Root, Node } from 'fumadocs-core/page-tree';
-import { listMemories, listSessions } from './data';
+import { getGlobalClaudeMd, listAllMemories, listMemories, listSessions } from './data';
 
 const SIDEBAR_SESSION_LIMIT = 40;
 
@@ -10,6 +10,30 @@ function shortDate(d: Date): string {
 export function sessionLabel(mtime: Date, firstPrompt: string | null): string {
   const snippet = firstPrompt ? firstPrompt.slice(0, 40) : 'no prompt';
   return `${shortDate(mtime)} · ${snippet}`;
+}
+
+export function projectDisplayName(realPath: string | null, slug: string): string {
+  return realPath?.split('/').pop() || realPath || slug;
+}
+
+export async function buildGlobalTree(): Promise<Root> {
+  const [claudeMd, groups] = await Promise.all([getGlobalClaudeMd(), listAllMemories()]);
+
+  const children: Node[] = [{ type: 'page', name: 'Overview', url: '/global' }];
+  if (claudeMd !== null) {
+    children.push({ type: 'page', name: 'CLAUDE.md', url: '/global/claude-md' });
+  }
+  for (const g of groups) {
+    children.push({ type: 'separator', name: projectDisplayName(g.realPath, g.slug) });
+    for (const m of g.memories) {
+      children.push({
+        type: 'page',
+        name: m.title,
+        url: `/p/${g.slug}/memory/${encodeURIComponent(m.file)}`,
+      });
+    }
+  }
+  return { name: 'Global', children };
 }
 
 export async function buildProjectTree(slug: string, displayName: string): Promise<Root> {

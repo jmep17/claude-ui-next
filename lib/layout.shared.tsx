@@ -7,5 +7,9 @@ export function baseOptions(): BaseLayoutProps {
       // JSX supported
       title: appName,
     },
+    links: [
+      { text: 'Projects', url: '/' },
+      { text: 'Global', url: '/global' },
+    ],
   };
 }
