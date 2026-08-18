@@ -63,6 +63,18 @@ export async function getGlobalClaudeMd(): Promise<string | null> {
   }
 }
 
+/** Parsed ~/.claude/settings.json, or null if absent or invalid. */
+export async function getSettings(): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await fs.readFile(path.join(CLAUDE_DIR, 'settings.json'), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 /** Memories from every project that has any, newest project first. */
 export async function listAllMemories(): Promise<ProjectMemories[]> {
   let entries;
