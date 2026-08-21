@@ -16,7 +16,7 @@ before starting, honor its STOP conditions, and update your row when done.
 | 003  | Plans browser at /global/plans | P2 | M | — | DONE (branch `claude/integrate-claude-ui-2pua08`) |
 | 004  | Skills browser at /global/skills | P2 | M | — | DONE (branch `claude/integrate-claude-ui-2pua08`) |
 | 005  | Prompt history at /global/history | P2 | M | — | DONE (branch `claude/integrate-claude-ui-2pua08`) |
-| 006  | Transcript improvements (timestamps, user markdown, metadata header) | P2 | M | 001 (soft) | TODO |
+| 006  | Transcript improvements (timestamps, user markdown, metadata header) | P2 | M | 001 (soft) | DONE (branch `claude/integrate-claude-ui-2pua08`) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
 
